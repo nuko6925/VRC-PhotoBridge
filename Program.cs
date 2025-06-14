@@ -12,10 +12,17 @@ internal static class Program
 {
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(60) };
     private static string _watchDirectory = "watch";
+    
+    private static readonly DateTime First = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Local);
+
+    private static long CurrentTimeMillis()
+    {
+        return (long)(DateTime.Now - First).TotalMilliseconds;
+    }
 
     private static void Main()
     {
-        Console.WriteLine("======================= VRC PhotoBridge =======================");
+        Console.WriteLine("======================= VRC PhotoBridge [1.1] =======================");
         if (Directory.Exists($@"C:\Users\{Environment.UserName}\Pictures\VRChat"))
         {
             _watchDirectory = $@"C:\Users\{Environment.UserName}\Pictures\VRChat";
@@ -59,10 +66,11 @@ internal static class Program
         {
             Console.WriteLine($"[{DateTime.Now:yyyy/MM/dd HH:mm:ss}] File {e.Name} has created.");
             if (!$"{e.Name}".Contains("png")) return;
-            var fileBytes = await WaitAndReadFileAsync(e.FullPath, retries: 5, delayMs: 500);
+            var workPath = e.FullPath;
+            var fileBytes = await WaitAndReadFileAsync(workPath, retries: 5, delayMs: 500);
             if (fileBytes == null)
             {
-                Console.WriteLine($"Failed to read file: {e.FullPath}");
+                Console.WriteLine($"Failed to read file: {workPath}");
                 return;
             }
 
@@ -85,18 +93,27 @@ internal static class Program
                 using var graphics = Graphics.FromImage(resizedImage);
                 graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 graphics.DrawImage(image, 0, 0, newWidth, newHeight);
-                resizedImage.Save(e.FullPath, ImageFormat.Png);
+                if (!Directory.Exists("PhotoBridge-Resize"))
+                {
+                    Directory.CreateDirectory("PhotoBridge-Resize");
+                }
+
+                workPath = Path.Combine(Environment.CurrentDirectory, $"PhotoBridge-Resize\\{CurrentTimeMillis()}.jpg");
+                resizedImage.Save(workPath, ImageFormat.Jpeg);
                 await Task.Delay(1000);
             }
+
             var request = new HttpRequestMessage(HttpMethod.Post, "https://api.imgur.com/3/image");
             request.Headers.Add("Authorization", "Client-ID xxxxxxxxxxxxxxx");
-            var content = new MultipartFormDataContent();
-            content.Add(new StreamContent(File.OpenRead(e.FullPath)), "image", $"{DateTime.Now}");
+            using var content = new MultipartFormDataContent();
+            await using var fileStream = new FileStream(workPath, FileMode.Open, FileAccess.Read, FileShare.Read); // Use Read-only access
+            using var streamContent = new StreamContent(fileStream);
+            content.Add(streamContent, "image", Path.GetFileName(workPath));
             content.Add(new StringContent("image"), "type");
             content.Add(new StringContent("VRC-PB"), "title");
             content.Add(new StringContent("Uploaded by VRC PhotoBridge"), "description");
             request.Content = content;
-            var response = await HttpClient.SendAsync(request);
+            using var response = await HttpClient.SendAsync(request);
             response.EnsureSuccessStatusCode();
             var data = await response.Content.ReadAsStringAsync();
             var doc = JsonDocument.Parse(data);
@@ -110,7 +127,12 @@ internal static class Program
                 var success = Clipboard.SetText(link);
                 Console.WriteLine(success ? "Link copied to clipboard." : "Failed to copy link to clipboard.");
             }
-                
+            if (File.Exists(workPath) && workPath.Contains("PhotoBridge-Resize") && workPath.EndsWith(".jpg"))
+            {
+                fileStream.Close();
+                File.Delete(workPath);
+            }
+
         }
         catch (Exception ex)
         {
